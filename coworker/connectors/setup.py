@@ -11,7 +11,7 @@ from typing import Any, Optional
 
 from ..secrets import SecretStore
 from .catalog_copy import about_for, access_for
-from .descriptors import get_descriptor, list_descriptors
+from .descriptors import MCP_TOKEN_AUTH, get_descriptor, list_descriptors
 from .tool_defs import patch_tool_settings, tool_dicts
 
 _EXPERIMENTAL_KEY = "experimental:settings"
@@ -381,6 +381,23 @@ def connect_connector(
         if not result.get("ok"):
             return result
         return {"ok": True, "account": identity or account_id, "account_id": account_id}
+    if d.auth == MCP_TOKEN_AUTH:
+        # The server entry carries the URL and the pin only. The token stays in the
+        # SecretStore and is injected as a header at session start, so mcp.json (plain
+        # JSON, also read raw by the headless runner) never holds it.
+        from ..mcp.config import put_global_server
+        from .tool_defs import mcp_pinned_tools
+
+        profile["mode"] = "mcp"
+        put_global_server(
+            name,
+            {
+                "url": profile["url"],
+                "requires_approval": True,
+                "include_tools": mcp_pinned_tools(name),
+                "enabled": True,
+            },
+        )
     secrets.put(f"{name}:default", profile)
     return {"ok": True, "account": identity}
 

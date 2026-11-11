@@ -46,7 +46,6 @@ def register_token_connector(
     monkeypatch.setitem(tool_defs_mod.TOOLS_BY_CONNECTOR, name, list(pins))
     for p in pins:
         monkeypatch.setitem(tool_defs_mod._KIND_BY_NAME, p.name, p.kind)
-        monkeypatch.setitem(tool_defs_mod._DEF_BY_NAME, p.name, p)
         monkeypatch.setitem(tool_defs_mod.TOOL_TO_CONNECTOR, p.name, name)
     return d
 
