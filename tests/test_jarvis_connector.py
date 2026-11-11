@@ -7,15 +7,19 @@ from __future__ import annotations
 from coworker.connectors.descriptors import MCP_TOKEN_AUTH, get_descriptor
 from coworker.connectors.tool_defs import mcp_pinned_tools, mcp_tool_defs
 
+# search_code, capture_screenshot, read_ui_elements and review_pr only read, but
+# Jarvis interpolates their arguments into shell commands unquoted, so they can run
+# arbitrary commands: they ask first, like run_command, until Jarvis quotes them.
+SHELL_INTERPOLATING = {"search_code", "capture_screenshot", "read_ui_elements", "review_pr"}
 READ = {
-    "read_file", "list_directory", "search_code", "list_remote_controls",
-    "check_delegation", "query_memory", "capture_screenshot", "list_windows",
-    "read_ui_elements", "read_clipboard", "list_processes", "recall",
+    "read_file", "list_directory", "list_remote_controls",
+    "check_delegation", "query_memory", "list_windows",
+    "read_clipboard", "list_processes", "recall",
     "security_audit", "context_snapshot", "read_handoff", "knowledge_recall",
-    "jarvis_status", "plan_read", "plan_agents", "analyze_traces", "review_pr",
+    "jarvis_status", "plan_read", "plan_agents", "analyze_traces",
     "get_shared_context",
 }
-WRITE = {
+WRITE = SHELL_INTERPOLATING | {
     "write_file", "run_command", "verify_work", "start_remote_control",
     "stop_remote_control", "delegate_to_claude", "spawn_agents", "configure_fleet",
     "launch_fleet", "send_message", "click_element", "focus_window", "send_keystroke",
@@ -37,7 +41,7 @@ def _defs():
 
 
 def test_jarvis_pins_exactly_58():
-    assert len(READ) == 22 and len(WRITE) == 36 and not READ & WRITE
+    assert len(READ) == 18 and len(WRITE) == 40 and not READ & WRITE
     assert set(mcp_pinned_tools("jarvis")) == READ | WRITE
     assert len(mcp_pinned_tools("jarvis")) == 58
 
@@ -47,6 +51,8 @@ def test_jarvis_kinds():
     assert {n for n, d in defs.items() if d.kind == "read"} == READ
     assert {n for n, d in defs.items() if d.kind == "write"} == WRITE
     assert defs["verify_work"].kind == "write"
+    for name in SHELL_INTERPOLATING:
+        assert defs[name].kind == "write", name
 
 
 def test_jarvis_tunnel_default_off():

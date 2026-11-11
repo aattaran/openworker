@@ -265,6 +265,10 @@ def _stable_error(error: str) -> str:
     return re.sub(r"\d{4,}", "N", stable)
 
 
+# Headroom between a backed server's slowest tool timeout and its stream read timeout.
+_SSE_READ_MARGIN = 30.0
+
+
 def _is_unauthorized(exc: Optional[BaseException]) -> bool:
     """True if an HTTP 401/403 is anywhere in the exception tree. The SDK transport runs
     in anyio task groups, so it arrives wrapped in an ExceptionGroup or as a cause."""
@@ -2202,11 +2206,18 @@ class SessionManager:
                 if server.name not in effective:
                     continue
                 prefix = f"mcp__{server.name}__"
+                pins = mcp_tool_defs(server.name)
                 server.include_tools = [
                     t.name.removeprefix(prefix)
-                    for t in mcp_tool_defs(server.name)
+                    for t in pins
                     if tool_enabled(self.secrets, server.name, t.name)
                 ]
+                if pins:
+                    # The stream is silent while a tool runs: read at least as long as
+                    # the slowest pinned tool may take, or its answer is never seen.
+                    server.sse_read_timeout = (
+                        max(tool_timeout(t.name) for t in pins) + _SSE_READ_MARGIN
+                    )
                 if descriptor.auth == MCP_TOKEN_AUTH:
                     problem = self._inject_mcp_token(server)
                     if problem:
@@ -2217,7 +2228,13 @@ class SessionManager:
                 # Raw servers outside the persona's declared scope stay off its sessions.
                 continue
             try:
-                conn = await self.mcp.ensure(server)
+                if backed and descriptor.auth == MCP_TOKEN_AUTH:
+                    # A self-hosted server restarts or rotates its token while the app
+                    # idles: round-trip a cached connection instead of handing this
+                    # session one whose session id or token is already dead.
+                    conn = await self.mcp.verify(server)
+                else:
+                    conn = await self.mcp.ensure(server)
                 self._mcp_errors.pop(server.name, None)
                 # Recovery resets the notice dedupe: if this server breaks again
                 # later, the next session gets a fresh transcript notice.
@@ -2705,7 +2722,18 @@ class SessionManager:
         self, name: str, fields: dict[str, Any], *, acknowledged: bool = False
     ) -> dict[str, Any]:
         # validates the token by a live API call (sync httpx) — run off the event loop
-        return connect_connector(self.secrets, name, fields, acknowledged=acknowledged)
+        from ..connectors.descriptors import MCP_TOKEN_AUTH
+        from ..connectors.descriptors import get_descriptor as connector_descriptor
+
+        result = connect_connector(self.secrets, name, fields, acknowledged=acknowledged)
+        d = connector_descriptor(name)
+        if result.get("ok") and d is not None and d.auth == MCP_TOKEN_AUTH:
+            # A re-pointed token server (new URL or token) must not keep serving later
+            # sessions over the connection to the old host.
+            conn = self.mcp._conns.get(name)
+            if conn is not None:
+                self.mcp._evict(name, conn)
+        return result
 
     def set_experimental_connectors(self, value: bool) -> dict[str, Any]:
         return set_experimental_enabled(self.secrets, value)

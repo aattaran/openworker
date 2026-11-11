@@ -57,7 +57,7 @@ def _seed(manager, *, token="t", url="http://127.0.0.1:9/mcp"):
 
 
 def _capture_ensure(manager, monkeypatch, seen):
-    async def fake_ensure(server):
+    async def fake_ensure(server, *, interactive=False):
         seen["server"] = server
         allow = set(server.include_tools or [])
         return SimpleNamespace(tools=[_fake_tool(n) for n in ("ping", "share") if n in allow])
@@ -147,6 +147,89 @@ def test_rotated_token_skips_with_error(tmp_path, monkeypatch):
 
         assert asyncio.run(scenario()) == []
     assert manager._mcp_errors["tok"] == "token rejected — reconnect from Connectors"
+
+
+def _slow(seconds: float) -> str:
+    import time
+
+    time.sleep(seconds)
+    return "done"
+
+
+def test_long_tool_outlives_default_sse_read_timeout(tmp_path, monkeypatch):
+    # A tool that legitimately runs past the SDK's SSE read timeout (300 s by default;
+    # 1 s here) sends no events while it works, so the stream read times out and the
+    # call is never answered. Backed servers must read for as long as their slowest pin.
+    from coworker.mcp import client as client_mod
+
+    register_token_connector(
+        monkeypatch,
+        "tok",
+        [ConnectorToolDef("tok", "mcp__tok__slow", "Slow", "read", "Slow.", timeout=8.0)],
+    )
+    manager = SessionManager(data_dir=tmp_path / "data")
+    monkeypatch.setattr(manager, "effective_connectors", lambda sid, agent=None: {"tok"})
+    monkeypatch.setattr(client_mod, "_SSE_READ_TIMEOUT", 1.0)
+    with mcp_http_server(token="t", tools={"slow": _slow}) as srv:
+        assert connect_connector(manager.secrets, "tok", {"url": srv.url, "token": "t"})["ok"]
+
+        async def scenario():
+            try:
+                tools = {t.__name__: t for t in await manager.prepare_mcp_tools("s1")}
+                return await asyncio.to_thread(tools["mcp__tok__slow"], seconds=2.5)
+            finally:
+                await manager.mcp.aclose()
+
+        assert "done" in str(asyncio.run(scenario()))
+
+
+def _two_sessions(manager, srv, between):
+    """Session s1 makes a call; `between` runs (a restart, a rotation); then s2 starts
+    on the SAME long-lived manager, as in the desktop app."""
+
+    async def scenario():
+        try:
+            s1 = {t.__name__: t for t in await manager.prepare_mcp_tools("s1")}
+            await asyncio.to_thread(s1["mcp__tok__ping"])
+            between()
+            s2 = await asyncio.wait_for(manager.prepare_mcp_tools("s2"), 30)
+            s2 = {t.__name__: t for t in s2}
+            out = await asyncio.to_thread(s2["mcp__tok__ping"]) if s2 else None
+            return s2, out
+        finally:
+            await manager.mcp.aclose()
+
+    return asyncio.run(scenario())
+
+
+def test_idle_restart_next_session_reconnects(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    with mcp_http_server(token="t", tools={"ping": _ping, "share": _share}) as srv:
+        assert connect_connector(manager.secrets, "tok", {"url": srv.url, "token": "t"})["ok"]
+        tools, out = _two_sessions(manager, srv, srv.restart)
+    assert "mcp__tok__ping" in tools
+    assert "pong" in str(out)
+
+
+def test_rotated_token_while_idle_skips_next_session(tmp_path, monkeypatch):
+    manager = _manager(tmp_path, monkeypatch)
+    with mcp_http_server(token="t", tools={"ping": _ping, "share": _share}) as srv:
+        assert connect_connector(manager.secrets, "tok", {"url": srv.url, "token": "t"})["ok"]
+        tools, _ = _two_sessions(manager, srv, lambda: srv.set_token("rotated"))
+    assert tools == {}
+    assert manager._mcp_errors["tok"] == "token rejected — reconnect from Connectors"
+
+
+def test_reconnect_drops_the_cached_connection(tmp_path, monkeypatch):
+    # Re-pointing a connected token server (e.g. local -> Cloud Run) must not leave
+    # later sessions on the old host's live connection.
+    manager = _manager(tmp_path, monkeypatch)
+    stale = SimpleNamespace(shutdown=asyncio.Event(), tools=[])
+    manager.mcp._conns["tok"] = stale
+    with mcp_http_server(token="t", tools={"ping": _ping}) as srv:
+        assert manager.connect_connector("tok", {"url": srv.url, "token": "t"})["ok"]
+    assert "tok" not in manager.mcp._conns
+    assert stale.shutdown.is_set()
 
 
 def test_headless_load_fails_closed(tmp_path, monkeypatch):

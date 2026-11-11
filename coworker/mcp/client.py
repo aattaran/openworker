@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # server answers 404 for our session id (streamable_http._send_session_terminated_error).
 _SESSION_TERMINATED = 32600
 
+# How long a Streamable HTTP stream may stay silent: the SDK's own default. A tool
+# sends nothing while it works, so a server whose tools run longer must raise it
+# (MCPServerDef.sse_read_timeout) or the call is never answered.
+_SSE_READ_TIMEOUT = 300.0
+
 _STDERR_TAIL_LINES = 20
 _STDERR_TAIL_CHARS = 1500
 
@@ -101,18 +106,21 @@ class MCPManager:
         conn = self._conns.get(server.name)
         if conn is not None:
             try:
-                listed = await asyncio.wait_for(conn.session.list_tools(), timeout=20)
+                listed = await asyncio.wait_for(
+                    self._on_conn(server.name, conn, conn.session.list_tools(), "tools/list"),
+                    timeout=20,
+                )
                 conn.tools = list(listed.tools)
                 return conn
-            except Exception:
-                conn.shutdown.set()
-                task = self._tasks.pop(server.name, None)
+            except Exception as exc:
+                logger.warning("mcp %s failed its health check: %s", server.name, exc)
+                task = self._tasks.get(server.name)
+                self._evict(server.name, conn)
                 if task is not None:
                     try:
                         await asyncio.wait_for(asyncio.shield(task), timeout=5)
                     except Exception:
                         task.cancel()
-                self._conns.pop(server.name, None)  # _serve pops too; belt and braces
         return await self.ensure(server, interactive=interactive)
 
     def last_stderr(self, name: str) -> Optional[str]:
@@ -125,21 +133,10 @@ class MCPManager:
         conn = self._conns.get(name)
         if conn is None:
             raise RuntimeError(f"MCP server not connected: {name}")
-        owner = self._tasks.get(name)
-        call = asyncio.ensure_future(conn.session.call_tool(tool, arguments or {}))
-        if owner is not None:
-            # A transport that dies mid-call (e.g. a restarted server rejecting the old
-            # session with a non-404 status) never answers the pending request, so the
-            # caller would wait out the whole tool timeout. The connection's own task
-            # ending is the signal that no answer is coming.
-            await asyncio.wait({call, owner}, return_when=asyncio.FIRST_COMPLETED)
-            if not call.done():
-                call.cancel()
-                logger.warning("mcp %s disconnected during %s", name, tool)
-                self._evict(name, conn)
-                raise ConnectionError(f"MCP server {name} disconnected during {tool}")
         try:
-            result = await call
+            result = await self._on_conn(
+                name, conn, conn.session.call_tool(tool, arguments or {}), tool
+            )
         except McpError as exc:
             if exc.error.code == _SESSION_TERMINATED:
                 # The server ended our session (restart, expiry): drop this connection
@@ -148,6 +145,29 @@ class MCPManager:
                 self._evict(name, conn)
             raise
         return _result_payload(result)
+
+    async def _on_conn(self, name: str, conn: _Conn, request: Any, what: str) -> Any:
+        """Await a request on `conn`, but not past the life of its connection.
+
+        A transport that dies mid-request (a restarted server rejecting the old session
+        with a non-404 status, or a 401 after a token rotation) never answers the
+        pending request, so the caller would wait out its whole timeout. The
+        connection's own task ending is the signal that no answer is coming."""
+        pending = asyncio.ensure_future(request)
+        owner = self._tasks.get(name)
+        if owner is None:
+            return await pending
+        try:
+            await asyncio.wait({pending, owner}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            pending.cancel()
+            raise
+        if not pending.done():
+            pending.cancel()
+            logger.warning("mcp %s disconnected during %s", name, what)
+            self._evict(name, conn)
+            raise ConnectionError(f"MCP server {name} disconnected during {what}")
+        return pending.result()
 
     def _evict(self, name: str, conn: _Conn) -> None:
         """Forget `conn` now (so ensure() reconnects) and let its task wind down."""
@@ -195,7 +215,12 @@ class MCPManager:
                         )
                     read, write, *_ = await stack.enter_async_context(
                         streamablehttp_client(
-                            server.url, headers=server.headers or None, auth=auth
+                            server.url,
+                            headers=server.headers or None,
+                            auth=auth,
+                            sse_read_timeout=max(
+                                _SSE_READ_TIMEOUT, server.sse_read_timeout or 0.0
+                            ),
                         )
                     )
                 else:

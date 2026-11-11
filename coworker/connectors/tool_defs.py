@@ -1213,7 +1213,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "jarvis",
         "mcp__jarvis__search_code",
         "Search code",
-        "read",
+        "write",
         "Search for text/regex patterns across files using findstr (Windows) or grep.",
     ),
     ConnectorToolDef(
@@ -1307,7 +1307,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "jarvis",
         "mcp__jarvis__capture_screenshot",
         "Capture screenshot",
-        "read",
+        "write",
         "Capture a screenshot of an IDE/desktop window (Windows only).",
     ),
     ConnectorToolDef(
@@ -1321,7 +1321,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "jarvis",
         "mcp__jarvis__read_ui_elements",
         "Read IDE panels",
-        "read",
+        "write",
         "Read text content from VS Code UI panels (terminal, editor, problems, buttons).",
     ),
     ConnectorToolDef(
@@ -1454,7 +1454,7 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
         "jarvis",
         "mcp__jarvis__review_pr",
         "Review pull request",
-        "read",
+        "write",
         "Fetch and analyze a GitHub pull request.",
     ),
     ConnectorToolDef(

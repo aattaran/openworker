@@ -39,6 +39,10 @@ class MCPServerDef:
     # "oauth" → browser OAuth 2.1 + PKCE with Dynamic Client Registration (mcp/oauth.py).
     # HTTP transport only; tokens live in the SecretStore, never in this file.
     auth: Optional[str] = None
+    # Seconds the HTTP stream may stay silent while a tool runs. Set at session start
+    # for connector-backed servers from their slowest pinned tool; never read from
+    # the config file. None keeps the client default.
+    sse_read_timeout: Optional[float] = None
 
 
 def global_mcp_path() -> Path:
