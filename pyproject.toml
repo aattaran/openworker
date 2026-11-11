@@ -82,6 +82,9 @@ testpaths = ["tests"]
 # console script (CI) does not put the root on sys.path the way `python -m pytest` does.
 pythonpath = ["."]
 asyncio_mode = "auto"
+markers = [
+    "readonly: operator-run e2e checks that are safe against a production server",
+]
 
 [tool.coverage.run]
 source = ["coworker"]
