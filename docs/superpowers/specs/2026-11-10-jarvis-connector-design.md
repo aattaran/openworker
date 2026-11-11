@@ -60,7 +60,10 @@ paste-fields form (`ConnectSetup`, AddConnectionModal.tsx:121-125). **No GUI cod
 ### 1c. Connect (setup.py `connect_connector`)
 For `auth == "mcp_token"`:
 1. Run the descriptor's `validate`, which makes a real MCP `initialize` call (sync httpx,
-   `Accept: application/json, text/event-stream`, parsing either reply). Results:
+   `Accept: application/json, text/event-stream`). It parses either reply; Jarvis's
+   transport replies with SSE by default, so `_validate_whoami` cannot be reused. It then
+   sends `DELETE` with the returned `mcp-session-id`, so validation leaves no session behind on
+   the server. Results:
    - 200 → `ValidationResult(ok, identity="<serverInfo.name> v<version>")`
    - 401/403 → `"token rejected"`
    - connect error → `"can't reach <url>"`
@@ -81,13 +84,19 @@ If the profile is missing or has no token, skip the server and record
 `_mcp_errors[name] = "not connected — reconnect from Connectors"`. Never send an empty header.
 
 ### 1e. Disconnect
-Delete the profile and the `mcp.json` entry, and revoke `mcp__<name>__*` trust rules. This is
-the existing behavior; it is verified by a test, not new code.
+Existing behavior covers it, verified by a test rather than new code:
+`disconnect_connector`'s `mode == "mcp"` branch (setup.py:587-637) deletes the `mcp.json`
+entry and the profile, and the manager wrapper shuts down the live connection.
+
+Trust rules are not revoked, and there is no need to: they apply only to category `"mcp"`
+(permissions.py:1031), and backed tools are category `"connector"`. For the same reason,
+`verify_work` (write) always asks, except in Auto-approve mode. A trust rule cannot waive it.
 
 ### 1f. Per-tool timeout
 - `ConnectorToolDef` gains `timeout: Optional[float] = None`.
-- `build_callables` takes a `timeout_for(full_tool_name) -> float` in place of the single
-  `timeout`, defaulting to the current 120.0.
+- `build_callables` gains an optional keyword `timeout_for: Callable[[str], float] | None`,
+  alongside the existing `timeout=120.0`. When it is given, it decides each tool's timeout by
+  full tool name. The 6 existing call sites are unchanged.
 - `prepare_mcp_tools` passes the catalog value for backed servers.
 - Raw servers and the headless runner keep 120 s.
 
@@ -156,8 +165,11 @@ read/write split above carries that weight.
 - The registry brand test passes for `jarvis`.
 
 **E2E, local real path, no paid calls:**
-- Run `node src/mcp/http.js` with a throwaway token, connect through `/v1/connectors/jarvis`,
-  and open a session.
+- Run `node src/mcp/http.js` from a **Jarvis git worktree** (its own `JARVIS_ROOT`, so the
+  real `bridge.pid` is never touched), with the working directory set to a temp dir and
+  `MONGODB_URI` unset. That way the real `.env`, and the real database, are never loaded.
+  Use a throwaway token on port 3199, connect through `/v1/connectors/jarvis`, and open a
+  session.
 - `jarvis_status` runs without approval.
 - `share_context` shows the approval card.
 - `verify_work` with `node -e "setTimeout(()=>{},150000)"` completes past 120 s.
