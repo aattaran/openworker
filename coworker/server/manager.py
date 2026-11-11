@@ -2176,7 +2176,7 @@ class SessionManager:
                 # explicit connect in Settings/Connectors.
                 continue
             descriptor = get_descriptor(server.name)
-            backed = descriptor is not None and bool(descriptor.mcp_url)
+            backed = descriptor is not None and descriptor.mcp_backed
             if backed:
                 # Connector-backed server: obey the same gates as connector tools —
                 # the session's effective connector set and the per-tool toggles.
@@ -2299,7 +2299,7 @@ class SessionManager:
         out = []
         for name, raw in read_global().items():
             d = get_descriptor(name)
-            if d is not None and d.mcp_url:
+            if d is not None and d.mcp_backed:
                 # Connector-backed server: surfaced on the Connectors page (its
                 # connect/disconnect lifecycle lives there), not in the MCP tab.
                 continue

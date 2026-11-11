@@ -33,6 +33,11 @@ class Field:
         }
 
 
+# Auth for a self-hosted MCP server behind a static bearer token: the user pastes the
+# server URL + token; the token lives only in the SecretStore and is sent as a header.
+MCP_TOKEN_AUTH = "mcp_token"
+
+
 @dataclass
 class ValidationResult:
     ok: bool
@@ -91,6 +96,12 @@ class ConnectorDescriptor:
     # string. Non-empty → profiles live at `<name>:account:<id>` and the
     # `:default` profile is pointer-only. Empty → single-profile connector.
     account_field: str = ""
+
+    @property
+    def mcp_backed(self) -> bool:
+        """Tools come from an MCP server pinned in tool_defs: a vendor URL with OAuth
+        (`mcp_url`), or a user-supplied URL with a static token (`MCP_TOKEN_AUTH`)."""
+        return bool(self.mcp_url) or self.auth == MCP_TOKEN_AUTH
 
 
 # -- validators (sync httpx, one-shot) -----------------------------------------

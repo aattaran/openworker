@@ -15,7 +15,13 @@ from coworker.connectors.setup import (
     disconnect_connector,
     update_connector_tools,
 )
-from coworker.connectors.descriptors import list_descriptors
+from coworker.connectors import descriptors as descriptors_mod
+from coworker.connectors.descriptors import (
+    MCP_TOKEN_AUTH,
+    ConnectorDescriptor,
+    get_descriptor,
+    list_descriptors,
+)
 from coworker.connectors.tool_defs import mcp_pinned_tools, mcp_tool_defs, tool_dicts
 from coworker.mcp.config import put_global_server, read_global
 from coworker.secrets import SecretStore
@@ -38,7 +44,7 @@ def _state(tmp_path, monkeypatch):
 def test_every_mcp_backed_descriptor_pins_tools():
     """The guard that keeps 'MCP-backed' meaning 'curated': a descriptor with an
     mcp_url must pin at least one tool, and every pin is classified read/write."""
-    backed = [d for d in list_descriptors() if d.mcp_url]
+    backed = [d for d in list_descriptors() if d.mcp_backed]
     assert {d.name for d in backed} >= {"monday", "jira"}
     # asana is deliberately NOT backed (2026-07-20): their V2 server rejects DCR —
     # needs a pre-registered MCP app + exact redirect URI vs our dynamic sidecar
@@ -179,6 +185,39 @@ def test_connector_backed_servers_hidden_from_mcp_tab(tmp_path, monkeypatch):
     put_global_server("granola", {"url": "https://mcp.granola.ai/mcp", "auth": "oauth"})
     names = [s["name"] for s in manager.list_mcp()]
     assert "granola" in names and "monday" not in names
+
+
+def _token_descriptor(name="tok"):
+    return ConnectorDescriptor(
+        name=name,
+        title="Tok",
+        icon="",
+        blurb="",
+        auth=MCP_TOKEN_AUTH,
+        two_way=False,
+        fields=[],
+        instructions=[],
+    )
+
+
+def test_mcp_backed_covers_token_auth():
+    assert _token_descriptor().mcp_backed is True
+    plain = ConnectorDescriptor(
+        name="plain", title="P", icon="", blurb="", auth="token",
+        two_way=False, fields=[], instructions=[],
+    )
+    assert plain.mcp_backed is False
+    assert get_descriptor("monday").mcp_backed is True
+
+
+def test_token_backed_server_hidden_from_mcp_tab(tmp_path, monkeypatch):
+    _state(tmp_path, monkeypatch)
+    monkeypatch.setitem(descriptors_mod._BY_NAME, "tok", _token_descriptor())
+    manager = SessionManager(data_dir=tmp_path / "data")
+    put_global_server("tok", {"url": "http://127.0.0.1:1/mcp"})
+    put_global_server("granola", {"url": "https://mcp.granola.ai/mcp", "auth": "oauth"})
+    names = [s["name"] for s in manager.list_mcp()]
+    assert "granola" in names and "tok" not in names
 
 
 def _fake_tool(name):
