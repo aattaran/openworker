@@ -122,13 +122,14 @@ jira/monday write tools run ungated in headless `--mcp` runs.
 Sourced from `server.tool(` registrations in Jarvis `src/mcp/server.js` (43) and
 `src/mcp/amplifier.js` (15).
 
-**read (22), auto-approved:**
-read_file, list_directory, search_code, list_remote_controls, check_delegation, query_memory,
-capture_screenshot, list_windows, read_ui_elements, read_clipboard, list_processes, recall,
-security_audit, context_snapshot, read_handoff, knowledge_recall, jarvis_status, plan_read,
-plan_agents, analyze_traces, review_pr, get_shared_context
+**read (18), auto-approved:**
+read_file, list_directory, list_remote_controls, check_delegation, query_memory,
+list_windows, read_clipboard, list_processes, recall, security_audit, context_snapshot,
+read_handoff, knowledge_recall, jarvis_status, plan_read, plan_agents, analyze_traces,
+get_shared_context
 
-**write (36), approval-gated:**
+**write (40), approval-gated:**
+search_code³, capture_screenshot³, read_ui_elements³, review_pr³,
 write_file, run_command, verify_work¹, start_remote_control, stop_remote_control, delegate_to_claude, spawn_agents, configure_fleet, launch_fleet,
 send_message, click_element, focus_window, send_keystroke, run_in_terminal, scroll_window,
 open_file_in_ide, click_at, type_text, manage_window, write_clipboard, launch_app,
@@ -138,6 +139,12 @@ upload_to_drive, mcp_connect², mcp_call²
 
 ¹ `verify_work` passes its `command` argument to `execSync`, which makes it equivalent to
 `run_command`. As read, it would have bypassed `run_command`'s write gate.
+³ Revised 2026-11-11 after the final review. These four only read, but Jarvis
+interpolates their arguments into shell commands without quoting them: `gh … --repo`,
+the findstr/grep pattern, and PowerShell `-WindowName`. As reads, they would let a
+prompt-injected model run commands with no approval card. They stay write until Jarvis
+quotes those arguments.
+
 ² `default_enabled=False`. They tunnel to any MCP server Jarvis can reach, which would
 sidestep the pinned allowlist. The user can enable each one per tool.
 
@@ -155,6 +162,13 @@ read/write split above carries that weight.
 **Unit tests** (pytest, following test_mcp_connectors.py / test_connector_registry.py):
 - The pin set equals the 58 names, kinds match this spec, and `mcp_connect`/`mcp_call` are
   default-off.
+- Added 2026-11-11 after the final review:
+  - A tool that runs past the SDK's default 300 s stream read timeout still answers:
+    backed servers read for their slowest pinned tool's timeout plus 30 s.
+  - A Jarvis restart or a token rotation while the app is idle is caught when the next
+    session starts, because token servers are health-checked (`verify`) instead of being
+    handed the cached connection.
+  - Reconnecting a token server drops the old connection.
 - `test_every_mcp_backed_descriptor_pins_tools` covers `mcp_token` connectors.
 - `prepare_mcp_tools` injects the bearer from the SecretStore. The raw bytes of `mcp.json`
   never contain the token.
