@@ -51,20 +51,47 @@ def register_token_connector(
     return d
 
 
-@dataclass
-class ServerHandle:
-    url: str
-    token: str
-    deletes: int = 0
-
-    def set_token(self, new: str) -> None:
-        self.token = new
-
-
 def free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+@dataclass
+class ServerHandle:
+    url: str
+    token: str
+    port: int
+    build: Callable[[], Any]
+    deletes: int = 0
+    _server: Any = None
+    _thread: Any = None
+
+    def set_token(self, new: str) -> None:
+        self.token = new
+
+    def start(self) -> None:
+        self._server = uvicorn.Server(
+            uvicorn.Config(
+                self.build(), host="127.0.0.1", port=self.port, log_level="warning", lifespan="on"
+            )
+        )
+        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread.start()
+        deadline = time.monotonic() + 10
+        while not self._server.started:
+            if time.monotonic() > deadline or not self._thread.is_alive():
+                raise RuntimeError("test MCP server failed to start")
+            time.sleep(0.02)
+
+    def stop(self) -> None:
+        self._server.should_exit = True
+        self._thread.join(10)
+
+    def restart(self) -> None:
+        """Same port, fresh MCP app: every session the clients hold is gone."""
+        self.stop()
+        self.start()
 
 
 @contextlib.contextmanager
@@ -74,16 +101,23 @@ def mcp_http_server(
     tools: dict[str, Callable[..., Any]],
     json_response: bool = False,
     name: str = "testsrv",
+    stale_session_status: int = 404,
 ) -> Iterator[ServerHandle]:
-    mcp = FastMCP(name, json_response=json_response)
-    for tool_name, fn in tools.items():
-        mcp.add_tool(fn, name=tool_name)
-    inner = mcp.streamable_http_app()
+    """`stale_session_status` replaces the 404 FastMCP gives an unknown session id
+    (e.g. 400, as Jarvis's http.js answered before it followed the MCP spec)."""
     port = free_port()
-    handle = ServerHandle(url=f"http://127.0.0.1:{port}/mcp", token=token)
+    handle: ServerHandle
 
-    async def app(scope, receive, send):
-        if scope["type"] == "http":
+    def build():
+        mcp = FastMCP(name, json_response=json_response)
+        for tool_name, fn in tools.items():
+            mcp.add_tool(fn, name=tool_name)
+        inner = mcp.streamable_http_app()
+
+        async def app(scope, receive, send):
+            if scope["type"] != "http":
+                await inner(scope, receive, send)
+                return
             auth = dict(scope["headers"]).get(b"authorization")
             if auth != f"Bearer {handle.token}".encode():
                 await send(
@@ -97,20 +131,21 @@ def mcp_http_server(
                 return
             if scope["method"] == "DELETE":
                 handle.deletes += 1
-        await inner(scope, receive, send)
 
-    server = uvicorn.Server(
-        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", lifespan="on")
+            async def send_with_status(message):
+                if message["type"] == "http.response.start" and message["status"] == 404:
+                    message = {**message, "status": stale_session_status}
+                await send(message)
+
+            await inner(scope, receive, send_with_status)
+
+        return app
+
+    handle = ServerHandle(
+        url=f"http://127.0.0.1:{port}/mcp", token=token, port=port, build=build
     )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if time.monotonic() > deadline or not thread.is_alive():
-            raise RuntimeError("test MCP server failed to start")
-        time.sleep(0.02)
+    handle.start()
     try:
         yield handle
     finally:
-        server.should_exit = True
-        thread.join(10)
+        handle.stop()

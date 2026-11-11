@@ -13,6 +13,7 @@ Tool execution from the (sync) ToolRegistry bridges back here via
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from contextlib import AsyncExitStack
 from typing import Any, IO, Optional
@@ -20,9 +21,15 @@ from typing import Any, IO, Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
+from mcp.shared.exceptions import McpError
 
 from .config import MCPServerDef
 
+logger = logging.getLogger(__name__)
+
+# The code the SDK's streamable-HTTP client puts on the error it synthesizes when the
+# server answers 404 for our session id (streamable_http._send_session_terminated_error).
+_SESSION_TERMINATED = 32600
 
 _STDERR_TAIL_LINES = 20
 _STDERR_TAIL_CHARS = 1500
@@ -118,8 +125,36 @@ class MCPManager:
         conn = self._conns.get(name)
         if conn is None:
             raise RuntimeError(f"MCP server not connected: {name}")
-        result = await conn.session.call_tool(tool, arguments or {})
+        owner = self._tasks.get(name)
+        call = asyncio.ensure_future(conn.session.call_tool(tool, arguments or {}))
+        if owner is not None:
+            # A transport that dies mid-call (e.g. a restarted server rejecting the old
+            # session with a non-404 status) never answers the pending request, so the
+            # caller would wait out the whole tool timeout. The connection's own task
+            # ending is the signal that no answer is coming.
+            await asyncio.wait({call, owner}, return_when=asyncio.FIRST_COMPLETED)
+            if not call.done():
+                call.cancel()
+                logger.warning("mcp %s disconnected during %s", name, tool)
+                self._evict(name, conn)
+                raise ConnectionError(f"MCP server {name} disconnected during {tool}")
+        try:
+            result = await call
+        except McpError as exc:
+            if exc.error.code == _SESSION_TERMINATED:
+                # The server ended our session (restart, expiry): drop this connection
+                # so the next ensure() opens a fresh one instead of reusing a dead id.
+                logger.warning("mcp %s ended our session; dropping the connection", name)
+                self._evict(name, conn)
+            raise
         return _result_payload(result)
+
+    def _evict(self, name: str, conn: _Conn) -> None:
+        """Forget `conn` now (so ensure() reconnects) and let its task wind down."""
+        if self._conns.get(name) is conn:
+            del self._conns[name]
+            self._tasks.pop(name, None)
+        conn.shutdown.set()
 
     async def aclose(self) -> None:
         for conn in self._conns.values():
@@ -137,6 +172,7 @@ class MCPManager:
         self, server: MCPServerDef, ready: asyncio.Future, *, interactive: bool = False
     ) -> None:
         errfile = None
+        conn: Optional[_Conn] = None
         try:
             async with AsyncExitStack() as stack:
                 if server.transport == "http":
@@ -201,8 +237,12 @@ class MCPManager:
                     errfile.close()
                 except OSError:
                     pass
-            self._conns.pop(server.name, None)
-            self._tasks.pop(server.name, None)
+            # Only clear our own entries: after an eviction a newer connection for the
+            # same server may already be registered under this name.
+            if conn is not None and self._conns.get(server.name) is conn:
+                del self._conns[server.name]
+            if self._tasks.get(server.name) is asyncio.current_task():
+                del self._tasks[server.name]
 
 
 def _result_payload(result: Any) -> Any:
