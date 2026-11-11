@@ -9,8 +9,11 @@ data model — only the connect action differs.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -175,6 +178,78 @@ def _validate_whoami(
         return ValidationResult(True, identity=str(identity(data)))
     except Exception:
         return ValidationResult(False, error="unexpected response from API")
+
+
+def _initialize_server_info(resp) -> Optional[dict]:
+    """`serverInfo` from an MCP `initialize` reply: a JSON body, or the first SSE event."""
+    import json as _json
+
+    ctype = resp.headers.get("content-type", "").lower()
+    try:
+        if "text/event-stream" in ctype:
+            line = next(
+                (l for l in resp.text.splitlines() if l.startswith("data:")), None
+            )
+            if line is None:
+                return None
+            message = _json.loads(line[len("data:") :])
+        else:
+            message = resp.json()
+    except ValueError as exc:
+        logger.warning("mcp validate: unparseable initialize reply (%s): %s", ctype, exc)
+        return None
+    info = (message.get("result") or {}).get("serverInfo") if isinstance(message, dict) else None
+    return info if isinstance(info, dict) else None
+
+
+def validate_mcp_token(creds: dict) -> ValidationResult:
+    """One MCP `initialize` against a token-guarded Streamable HTTP server, then close
+    the session it opened so validating leaves nothing behind on the server."""
+    import httpx
+    from mcp.types import LATEST_PROTOCOL_VERSION
+
+    url = str(creds.get("url", "")).strip()
+    headers = {
+        "Authorization": f"Bearer {str(creds.get('token', '')).strip()}",
+        "Accept": "application/json, text/event-stream",
+    }
+    body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "openworker", "version": "connect-check"},
+        },
+    }
+    try:
+        resp = httpx.post(url, headers=headers, json=body, timeout=15)
+    except httpx.ConnectError:
+        return ValidationResult(False, error=f"can't reach {url}")
+    except httpx.HTTPError as exc:
+        return ValidationResult(False, error=str(exc) or exc.__class__.__name__)
+    status = resp.status_code
+    if status in (401, 403):
+        return ValidationResult(False, error="token rejected")
+    if status in (404, 405) and not url.rstrip("/").endswith("/mcp"):
+        return ValidationResult(
+            False, error=f"no MCP endpoint at {url} — did you mean {url.rstrip('/')}/mcp?"
+        )
+    info = _initialize_server_info(resp) if status < 400 else None
+    if info is None:
+        return ValidationResult(False, error=f"not an MCP server: HTTP {status}")
+    session = resp.headers.get("mcp-session-id")
+    if session:
+        try:
+            httpx.delete(url, headers={**headers, "mcp-session-id": session}, timeout=5)
+        except httpx.HTTPError as exc:
+            # Validation already succeeded; a leftover session only costs the server
+            # memory until it restarts, so log rather than fail the connect.
+            logger.warning("mcp validate: closing session at %s failed: %s", url, exc)
+    return ValidationResult(
+        True, identity=f"{info.get('name', '?')} v{info.get('version', '?')}"
+    )
 
 
 def _validate_notion(creds: dict) -> ValidationResult:
@@ -1450,6 +1525,37 @@ DESCRIPTORS: list[ConnectorDescriptor] = [
         available=False,
         brand_color="#06ac38",
         logo="pagerduty",
+    ),
+    ConnectorDescriptor(
+        name="jarvis",
+        title="Jarvis",
+        icon="◎",
+        blurb="Your self-hosted Jarvis gateway: delegate to agents, message your channels, "
+        "search memory, and drive your desktop — every write asks first.",
+        auth=MCP_TOKEN_AUTH,
+        two_way=False,
+        brand_color="#0ea5e9",
+        aliases=("gateway", "agents", "self-hosted", "mcp"),
+        fields=[
+            Field(
+                "url",
+                "MCP URL",
+                help="Where Jarvis's MCP server listens — local or Cloud Run, ending in /mcp.",
+                placeholder="http://localhost:3100/mcp",
+            ),
+            Field(
+                "token",
+                "MCP token",
+                secret=True,
+                help="MCP_SECRET_TOKEN from Jarvis's .env.",
+            ),
+        ],
+        instructions=[
+            "Start Jarvis's MCP server (node src/mcp/http.js) or use your Cloud Run URL.",
+            "Paste its URL ending in /mcp, and the MCP_SECRET_TOKEN from Jarvis's .env.",
+            "The token stays on this computer; Jarvis's tools run on the Jarvis host, so writes always ask first.",
+        ],
+        validate=validate_mcp_token,
     ),
 ]
 

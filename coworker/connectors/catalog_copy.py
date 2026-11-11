@@ -54,6 +54,10 @@ ABOUT: dict[str, str] = {
     "asana": "Keep up with your Asana work — search and read tasks and "
     "projects, create tasks, and comment. Connects with a personal access "
     "token from the Asana developer console.",
+    "jarvis": "Work through your self-hosted Jarvis gateway — delegate to Claude "
+    "Code agents, message your Slack/Telegram channels, search its memory and "
+    "knowledge base, and drive the desktop it runs on. Connects with Jarvis's MCP "
+    "URL and token; agents get a pinned set of its tools.",
 }
 
 # What connecting actually grants, as short honest bullets. Write powers always
@@ -201,6 +205,12 @@ ACCESS: dict[str, list[str]] = {
     ],
     "hunter": [
         "Finds and verifies email addresses, using your Hunter quota.",
+    ],
+    "jarvis": [
+        "Reads files, memory, status, and screenshots on the Jarvis host.",
+        "Runs commands, delegates to agents, sends channel messages, and "
+        "controls the desktop there — each write asks first.",
+        "Runs on the Jarvis host, outside this computer's sandbox.",
     ],
 }
 
