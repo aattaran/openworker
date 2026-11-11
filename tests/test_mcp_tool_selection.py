@@ -7,8 +7,14 @@ user opts them in (fail-closed growth).
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import threading
 from types import SimpleNamespace
 
+import pytest
+
+from coworker.connectors.tool_defs import tool_timeout
+from coworker.mcp import tools as tools_mod
 from coworker.mcp.config import MCPServerDef
 from coworker.mcp.tools import build_callables
 from coworker.tools.registry import ToolRegistry
@@ -85,3 +91,62 @@ def test_destination_stamp_travels_with_every_callable():
     stdio_server = MCPServerDef(name="localfs", transport="stdio", command="npx")
     (fn2,) = _build(stdio_server, ["read"])
     assert fn2.__coworker_mcp_destination__ == {"transport": "stdio", "host": ""}
+
+
+async def _slow_call(tool: str, args: dict) -> str:
+    await asyncio.sleep(0.3)
+    return f"done:{tool}"
+
+
+def test_build_callables_uses_per_tool_timeout():
+    loop = asyncio.new_event_loop()
+    runner = threading.Thread(target=loop.run_forever, daemon=True)
+    runner.start()
+    try:
+        server = MCPServerDef(name="srv", transport="http", url="https://x.test/mcp")
+        fast, slow = build_callables(
+            server,
+            [_tool("fast"), _tool("slow")],
+            _slow_call,
+            loop,
+            timeout_for=lambda n: 0.05 if n == "mcp__srv__fast" else 5.0,
+        )
+        with pytest.raises(concurrent.futures.TimeoutError):
+            fast()
+        assert slow() == "done:slow"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        runner.join(2)
+        loop.close()
+
+
+def test_build_callables_default_timeout_unchanged(monkeypatch):
+    seen: list[float] = []
+
+    class _Future:
+        def result(self, timeout):
+            seen.append(timeout)
+            return "ok"
+
+    def _fake_submit(coro, loop):
+        coro.close()
+        return _Future()
+
+    async def _call(tool, args):
+        return None
+
+    monkeypatch.setattr(tools_mod.asyncio, "run_coroutine_threadsafe", _fake_submit)
+    server = MCPServerDef(name="srv", transport="http", url="https://x.test/mcp")
+    loop = asyncio.new_event_loop()
+    try:
+        (fn,) = build_callables(server, [_tool("any")], _call, loop)
+        fn()
+    finally:
+        loop.close()
+    assert seen == [120.0]
+
+
+def test_tool_timeout_reads_catalog():
+    assert tool_timeout("no_such_tool") == 120.0
+    assert tool_timeout("no_such_tool", default=7.0) == 7.0
+    assert tool_timeout("canva_get_export") == 120.0

@@ -82,6 +82,7 @@ from ..connectors.browser_automation import (
 from ..connectors.parked import ParkedStore
 from ..mcp import (
     MCPManager,
+    MCPServerDef,
     build_callables,
     delete_global_server,
     load_mcp_servers,
@@ -262,6 +263,19 @@ def _stable_error(error: str) -> str:
     identical failures across relaunches."""
     stable = re.sub(r"0x[0-9a-fA-F]+", "0xADDR", error or "")
     return re.sub(r"\d{4,}", "N", stable)
+
+
+def _is_unauthorized(exc: Optional[BaseException]) -> bool:
+    """True if an HTTP 401/403 is anywhere in the exception tree. The SDK transport runs
+    in anyio task groups, so it arrives wrapped in an ExceptionGroup or as a cause."""
+    if exc is None:
+        return False
+    response = getattr(exc, "response", None)
+    if getattr(response, "status_code", None) in (401, 403):
+        return True
+    if any(_is_unauthorized(sub) for sub in getattr(exc, "exceptions", None) or []):
+        return True
+    return _is_unauthorized(exc.__cause__ or exc.__context__)
 
 
 def mention_opening(src, text: str, thread: Optional[str] = None, context: str = "") -> str:
@@ -2139,11 +2153,12 @@ class SessionManager:
         """
         if session_id in self._engines:
             return []
-        from ..connectors.descriptors import get_descriptor
+        from ..connectors.descriptors import MCP_TOKEN_AUTH, get_descriptor
         from ..connectors.tool_defs import (
             approval_for_tool,
             mcp_tool_defs,
             tool_enabled,
+            tool_timeout,
         )
 
         from ..mcp import oauth as mcp_oauth
@@ -2192,6 +2207,12 @@ class SessionManager:
                     for t in mcp_tool_defs(server.name)
                     if tool_enabled(self.secrets, server.name, t.name)
                 ]
+                if descriptor.auth == MCP_TOKEN_AUTH:
+                    problem = self._inject_mcp_token(server)
+                    if problem:
+                        self._mcp_errors[server.name] = problem
+                        logger.warning("mcp %s skipped: %s", server.name, problem)
+                        continue
             elif persona_mcp is not None and server.name not in persona_mcp:
                 # Raw servers outside the persona's declared scope stay off its sessions.
                 continue
@@ -2202,7 +2223,18 @@ class SessionManager:
                 # later, the next session gets a fresh transcript notice.
                 self._clear_mcp_notified(server.name)
             except Exception as exc:
-                if mcp_oauth.is_auth_required(exc):
+                if (
+                    backed
+                    and descriptor.auth == MCP_TOKEN_AUTH
+                    and _is_unauthorized(exc)
+                ):
+                    # The pasted token no longer matches the server's (rotated or
+                    # reset): only a reconnect with the new token fixes it.
+                    self._mcp_errors[server.name] = (
+                        "token rejected — reconnect from Connectors"
+                    )
+                    logger.warning("mcp %s rejected its token", server.name)
+                elif mcp_oauth.is_auth_required(exc):
                     # Stored tokens no longer refresh (vendor rotated/expired
                     # them) — the non-interactive connect refused to open a
                     # browser. Record it so the MCP page shows WHY the server is
@@ -2245,6 +2277,7 @@ class SessionManager:
                 conn.tools,
                 lambda tool, args, name=server.name: self.mcp.call(name, tool, args),
                 loop,
+                timeout_for=tool_timeout if backed else None,
             )
             if backed:
                 # Per-tool approval from the pinned read/write classification
@@ -2264,6 +2297,19 @@ class SessionManager:
                     fn.__aisuite_tool_metadata__.category = "connector"
             out.extend(callables)
         return out
+
+    def _inject_mcp_token(self, server: MCPServerDef) -> Optional[str]:
+        """Point a token-auth server at the URL + bearer the user connected with. Both
+        live only in the SecretStore profile, never in mcp.json. Returns why the server
+        cannot be used, or None."""
+        profile = self.secrets.get(f"{server.name}:default") or {}
+        url = str(profile.get("url") or "").strip()
+        token = str(profile.get("token") or "").strip()
+        if not url or not token:
+            return "not connected — reconnect from Connectors"
+        server.url = url
+        server.headers = {**server.headers, "Authorization": f"Bearer {token}"}
+        return None
 
     def _should_notify_mcp_failure(self, name: str, error: str) -> bool:
         """True once per failure episode: the first session after `name` starts

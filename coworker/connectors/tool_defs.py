@@ -1605,6 +1605,14 @@ TOOL_DEFS: tuple[ConnectorToolDef, ...] = (
 )
 
 _KIND_BY_NAME = {d.name: d.kind for d in TOOL_DEFS}
+_DEF_BY_NAME = {d.name: d for d in TOOL_DEFS}
+
+
+def tool_timeout(name: str, default: float = 120.0) -> float:
+    d = _DEF_BY_NAME.get(name)
+    if d is None or d.timeout is None:
+        return default
+    return d.timeout
 
 
 # §36: the registry's read/write kind is the SINGLE source of truth for whether a
